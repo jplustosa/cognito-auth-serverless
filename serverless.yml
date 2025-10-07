@@ -1,0 +1,323 @@
+# serverless.yml
+
+service: cognito-auth-serverless
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 30
+  
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    USER_POOL_ID: { Ref: CognitoUserPool }
+    USER_POOL_CLIENT_ID: { Ref: CognitoUserPoolClient }
+    USERS_TABLE: ${self:service}-users-${self:provider.stage}
+    PROFILES_TABLE: ${self:service}-profiles-${self:provider.stage}
+
+  iam:
+    role:
+      statements:
+        # Permissões DynamoDB
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - !GetAtt UsersTable.Arn
+            - !GetAtt ProfilesTable.Arn
+        
+        # Permissões Cognito
+        - Effect: Allow
+          Action:
+            - cognito-idp:AdminGetUser
+            - cognito-idp:AdminUpdateUserAttributes
+            - cognito-idp:AdminDeleteUser
+            - cognito-idp:ListUsers
+          Resource: !GetAtt CognitoUserPool.Arn
+
+functions:
+  # Authentication Handlers
+  signup:
+    handler: handlers/auth.signup
+    events:
+      - http:
+          path: /auth/signup
+          method: post
+          cors: true
+
+  login:
+    handler: handlers/auth.login
+    events:
+      - http:
+          path: /auth/login
+          method: post
+          cors: true
+
+  confirmSignup:
+    handler: handlers/auth.confirmSignup
+    events:
+      - http:
+          path: /auth/confirm
+          method: post
+          cors: true
+
+  forgotPassword:
+    handler: handlers/auth.forgotPassword
+    events:
+      - http:
+          path: /auth/forgot-password
+          method: post
+          cors: true
+
+  confirmPassword:
+    handler: handlers.auth.confirmPassword
+    events:
+      - http:
+          path: /auth/confirm-password
+          method: post
+          cors: true
+
+  refreshToken:
+    handler: handlers/auth.refreshToken
+    events:
+      - http:
+          path: /auth/refresh
+          method: post
+          cors: true
+
+  # User Management (Protegidas por Cognito Authorizer)
+  getProfile:
+    handler: handlers/profile.getProfile
+    events:
+      - http:
+          path: /profile
+          method: get
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  updateProfile:
+    handler: handlers/profile.updateProfile
+    events:
+      - http:
+          path: /profile
+          method: put
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  changePassword:
+    handler: handlers/profile.changePassword
+    events:
+      - http:
+          path: /profile/password
+          method: put
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  # Admin Functions (Apenas para usuários com role admin)
+  listUsers:
+    handler: handlers/admin.listUsers
+    events:
+      - http:
+          path: /admin/users
+          method: get
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  getUser:
+    handler: handlers/admin.getUser
+    events:
+      - http:
+          path: /admin/users/{userId}
+          method: get
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  updateUserRole:
+    handler: handlers/admin.updateUserRole
+    events:
+      - http:
+          path: /admin/users/{userId}/role
+          method: put
+          cors: true
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref ApiGatewayAuthorizer
+
+  # Health Check (Pública)
+  health:
+    handler: handlers/auth.health
+    events:
+      - http:
+          path: /health
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    # Cognito User Pool
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-user-pool-${self:provider.stage}
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Schema:
+          - Name: email
+            Required: true
+            Mutable: true
+          - Name: name
+            Required: true
+            Mutable: true
+          - Name: role
+            Required: false
+            Mutable: true
+            AttributeDataType: String
+            DeveloperOnlyAttribute: false
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: true
+            RequireUppercase: true
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: false
+
+    # Cognito User Pool Client
+    CognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-client-${self:provider.stage}
+        UserPoolId: !Ref CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        GenerateSecret: false
+        AccessTokenValidity: 60
+        IdTokenValidity: 60
+        RefreshTokenValidity: 43200
+        SupportedIdentityProviders:
+          - COGNITO
+        CallbackURLs:
+          - http://localhost:3000/callback
+          - https://yourdomain.com/callback
+        LogoutURLs:
+          - http://localhost:3000
+          - https://yourdomain.com
+        AllowedOAuthFlows:
+          - code
+        AllowedOAuthScopes:
+          - email
+          - openid
+          - profile
+        AllowedOAuthFlowsUserPoolClient: true
+
+    # API Gateway Authorizer
+    ApiGatewayAuthorizer:
+      Type: AWS::ApiGateway::Authorizer
+      Properties:
+        Name: CognitoAuthorizer
+        RestApiId: !Ref ApiGatewayRestApi
+        Type: COGNITO_USER_POOLS
+        ProviderARNs:
+          - !GetAtt CognitoUserPool.Arn
+        IdentitySource: method.request.header.Authorization
+
+    # DynamoDB Tables
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.USERS_TABLE}
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: email
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: EmailIndex
+            KeySchema:
+              - AttributeName: email
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+
+    ProfilesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.PROFILES_TABLE}
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+  Outputs:
+    UserPoolId:
+      Description: "Cognito User Pool ID"
+      Value: !Ref CognitoUserPool
+
+    UserPoolClientId:
+      Description: "Cognito User Pool Client ID"
+      Value: !Ref CognitoUserPoolClient
+
+    ApiUrl:
+      Description: "API Gateway URL"
+      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}"
+
+    Region:
+      Description: "AWS Region"
+      Value: !Ref AWS::Region
+
+plugins:
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 4000
